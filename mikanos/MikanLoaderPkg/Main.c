@@ -6,6 +6,7 @@
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/DiskIo2.h>
 #include <Protocol/BlockIo.h>
+#include <Guid/FileInfo.h>
 
 // #@@range_begin(struct_memory_map)
 struct MemoryMap
@@ -149,6 +150,66 @@ EFI_STATUS EFIAPI UefiMain(
     SaveMemoryMap(&memmap, memmap_file);
     memmap_file->Close(memmap_file);
     // #@@range_end(main)
+
+    // #@@range_begin(read_kernel)
+    //メイン関数でカーネルファイルを読み込む部分
+    EFI_FILE_PROTOCOL* kernel_file;
+
+    //読み込みモードで開く
+    root_dir->Open(
+        root_dir, &kernel_file, L"\\kernel.elf",
+        EFI_FILE_MODE_READ, 0
+    );
+    
+    //kernel.elfを入れるために+12
+    UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16) * 12;
+    UINT8 file_info_buffer[file_info_size];
+     //関数でファイルの情報を獲得
+    kernel_file->GetInfo(
+        kernel_file, &gEfiFileInfoGuid,
+        &file_info_size, file_info_buffer
+    );
+
+    EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
+    UINTN kernel_file_size = file_info->FileSize;
+
+    EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;
+    gBS->AllocatePages(
+        AllocateAddress, EfiLoaderData,
+        (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr
+    );
+    kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+    Print(L"kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
+    // #@@range_end(read_kernel)
+
+    // #@@range_begin(exit_bs)
+    //カーネル起動前にブートサービスを停止させる。
+    EFI_STATUS status;
+    //ブートサービスを停止
+    status = gBS->ExitBootServices(image_handle, memmap.map_key);
+    if(EFI_ERROR(status)){
+        status = GetMemoryMap(&memmap);
+        if(EFI_ERROR(status)){
+            Print(L"failed to get memory map: %r\n", status);
+            while(1);
+        }
+        status = gBS->ExitBootServices(image_handle, memmap.map_key);
+        if(EFI_ERROR(status)){
+            //2回目は重大なエラー
+            Print(L"Could not exit boot service: %r\n", status);
+            while(1);
+        }
+    }
+    // #@@range_end(exit_bs)
+
+    // #@@range_begin(call_kernel)
+    //エントリポイント(KernelMain)を探して、呼び出す。
+    UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);
+
+    typedef void EntryPointType(void);
+    EntryPointType* entry_point = (EntryPointType*)entry_addr;
+    entry_point();
+    // #@@range_end(call_kernel)
 
     Print(L"All done\n");
 
